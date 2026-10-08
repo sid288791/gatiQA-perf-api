@@ -1,0 +1,75 @@
+spring:
+  application:
+    name: gatiQA-perf-api
+
+  datasource:
+    # Reuses the same Postgres instance as gatiQA-test-api / gatiQA-test-generator
+    # (docker-compose service "gatiqa-postgres"); this service owns its own
+    # tables (perf_test_run / perf_test_target / perf_test_result), managed by
+    # Flyway below, so no other service's schema is touched.
+    url: ${GATIQA_PERF_DATABASE_URL:jdbc:postgresql://localhost:5432/gatiqa}
+    username: ${GATIQA_PERF_DATABASE_USERNAME:gatiqa}
+    password: ${GATIQA_PERF_DATABASE_PASSWORD:gatiqa}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+
+  flyway:
+    enabled: true
+    # The gatiqa schema is shared and non-empty, so a baseline is required —
+    # but it must be version 0, otherwise the default baseline version (1)
+    # would skip our own V1 migration as "at or below baseline".
+    baseline-on-migrate: true
+    baseline-version: 0
+    # Dedicated history table: other services share this database and must
+    # not see (or be seen by) this service's migration history.
+    table: flyway_schema_history_perf
+    locations: classpath:db/migration
+
+  ai:
+    # Chat model: OpenAI-compatible endpoint. Defaults to the local Ollama
+    # instance already used by gatiQA-test-generator, but is fully
+    # env-driven so a hosted OpenAI (or any OpenAI-compatible) provider can
+    # be swapped in per-environment / in Kubernetes via a Secret.
+    openai:
+      base-url: ${GATIQA_PERF_LLM_BASE_URL:http://localhost:11434/v1}
+      api-key: ${GATIQA_PERF_LLM_API_KEY:ollama}
+      # Local LLMs (Ollama) can take minutes per call — the default client
+      # timeout is far shorter and the call fails before the model answers.
+      timeout: ${GATIQA_PERF_LLM_TIMEOUT:300s}
+      chat:
+        options:
+          model: ${GATIQA_PERF_LLM_MODEL:qwen3:4b}
+          temperature: ${GATIQA_PERF_LLM_TEMPERATURE:0.2}
+
+    # Cap retries so a failing LLM call doesn't multiply the wait.
+    retry:
+      max-attempts: ${GATIQA_PERF_LLM_RETRY_ATTEMPTS:2}
+
+    mcp:
+      client:
+        enabled: true
+        name: gatiqa-perf-api
+        version: 1.0.0
+        request-timeout: ${GATIQA_PERF_MCP_TIMEOUT:65s}
+        type: SYNC
+        streamable-http:
+          connections:
+            k6:
+              url: ${GATIQA_PERF_MCP_K6_URL:http://localhost:8081}
+              endpoint: ${GATIQA_PERF_MCP_K6_ENDPOINT:/mcp}
+
+server:
+  port: ${GATIQA_PERF_SERVER_PORT:8082}
+
+gatiqa:
+  perf:
+    engine:
+      # k6 MCP `run_script` caps the total run at 5 minutes (300s); ramp-up
+      # and steady-state duration together must stay within that budget.
+      max-total-duration-seconds: 300
+      # Bounded LLM script-generation/repair attempts before failing the run.
+      max-generation-attempts: 3
